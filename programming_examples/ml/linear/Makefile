@@ -38,13 +38,13 @@ build/aie_trace.mlir: ${srcdir}/${aie_py_src}
 	mkdir -p ${@D}
 	python3 $< ${devicename} ${trace_size} > $@
 
-build/final.xclbin: build/aie.mlir build/mul.o
+build/final.xclbin: build/aie.mlir build/linear.o
 	mkdir -p ${@D}
 	cd ${@D} && aiecc.py --aie-generate-xclbin --aie-generate-npu-insts --no-compile-host \
 		--no-xchesscc --no-xbridge \
 		--xclbin-name=${@F} --npu-insts-name=insts.bin ${<F}
 
-build/final_trace.xclbin: build/aie_trace.mlir build/mul.o
+build/final_trace.xclbin: build/aie_trace.mlir build/linear.o
 	mkdir -p ${@D}
 	cd ${@D} && aiecc.py --aie-generate-xclbin --aie-generate-npu-insts --no-compile-host \
 		--no-xchesscc --no-xbridge \
@@ -63,8 +63,9 @@ endif
 
 run: ${targetname}.exe build/final.xclbin
 	${powershell} ./$< -x build/final.xclbin -i build/insts.bin -k MLIR_AIE
+
 trace: ${targetname}.exe build/final_trace.xclbin
-	${powershell} ./$< -x build/final_trace/xclbin -i build/insts/bin -k MLIR_AIE -t ${trace_size}
+	${powershell} ./$< -x build/final_trace.xclbin -i build/insts.bin -k MLIR_AIE -t ${trace_size}
 	${srcdir}/../../utils/parse_trace.py --input trace.txt --mlir build/aie_trace.mlir --output trace_linear.json
 	${srcdir}/../../utils/get_trace_summary.py --input trace_linear.json
 
