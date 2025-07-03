@@ -34,7 +34,7 @@ The file outlines the commands to run the design successfully. Specifically, it 
 Contains code needed for row-wise mutliplication.
 
 ### CMakeLists.txt and common.h
-Contains code needed for successful compilation. 
+Contain code needed for successful compilation. 
 
 ## Usage
 
