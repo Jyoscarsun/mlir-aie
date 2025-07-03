@@ -14,6 +14,8 @@ from aie.utils.trace import PortEvent
 from aie.helpers.dialects.ext.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
 
+
+
 def main():
     # Parse arguments
     argparser = argparse.ArgumentParser(
@@ -23,10 +25,12 @@ def main():
     argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu")
     
     # Default dimensions of the matrices, weights, and biases: change later
-    argparser.add_argument("-B", type=int, default=1)
-    argparser.add_argument("-T", type=int, default=56)
-    argparser.add_argument("-D", type=int, default=41)
-    argparser.add_argument("-H", type=int, default=4)
+    argparser.add_argument("-T", type=int, default=256)
+    argparser.add_argument("-D", type=int, default=256)
+    argparser.add_argument("-H", type=int, default=256)
+    argparser.add_argument("-t", type=int, default=64)
+    argparser.add_argument("-d", type=int, default=64)
+    argparser.add_argument("-hval", type=int, default=32)
 
     # For this code, assume both --dtype_in and --dtype_out are bf16
     argparser.add_argument("--trace_size", type=int, default=0)
@@ -35,32 +39,50 @@ def main():
     # Call to the linear function
     linear(
         args.dev,
-        args.B,
         args.T,
         args.D,
         args.H,
+        args.t, 
+        args.d,
+        args.hval,
         args.trace_size,
     )
 
+def ceildiv(a, b):
+    return (a + b - 1) // b
+
 def linear(
-    dev, B, T, D, H, trace_size      
+    dev, T, D, H, t, d, h, trace_size, dtype_in_str="bf16", dtype_out_str="bf16" 
 ):
-    # No tiling needed for the implementation 
+    assert T % t == 0
+    assert D % d == 0
+    assert H % h == 0
+
+    # r, p, q are the dimensions required by the microkernel MAC instructions.
+    r, p, q = 4, 8, 8 # In this case, use r, p, q values of npu2 bf16, emulate_bf16_mmul_with_bfp16 = False 
+    
+    assert t % r == 0
+    assert d % p == 0
+    assert h % q == 0
+    
     vectorized = True
     enable_tracing = True if trace_size > 0 else False
 
-    dtype_in = np.bfloat16
-    dtype_out = np.bfloat16
+    dtype_in = bfloat16
+    dtype_out = bfloat16
 
-    X_sz = B * T * D
-    W_sz = H * D
+    X_sz = T * D
+    W_sz = D * H
     b_sz = H
-    i_sz = T * H
-    Y_sz = B * T * H
+    Y_sz = T * H
+
+    T_div_t = T // t 
+    D_div_d = D // d 
+    H_div_h = H // h 
+    tiles = T_div_t * H_div_h
 
     with mlir_mod_ctx() as ctx:
-        
-        Y_sz_in_bytes = Y_sz * np.dtype(dtype_out).itemsize
+
 
         if dev == "npu":
             dev_ty = AIEDevice.npu1_1col
@@ -70,113 +92,159 @@ def linear(
         @device(dev_ty)
         def device_body():
             # x_ty is declared as (T, D) instead of (B, T, D) since the value of B is always 1
-            x_ty = np.ndarray[(T, D), np.dtype[dtype_in]]
-            w_ty = np.ndarray[(H, D), np.dtype[dtype_in]]
-            b_ty = np.ndarray[(H), np.dtype[dtype_in]]
-            y_ty = np.ndarray[(B, T, H), np.dtype(dtype_out)]
-            # Type of intermediate variable, represents the product of matrix multiplication of X and W
-            i_ty = np.ndarray[(T, H), np.dtype(dtype_out)]
-
-            # Compute the transform pattern of weight W
-            transpose_W = TensorAccessPattern(
-                (H, D), offset=0, sizes=[1, 1, D, H], strides=[1, 1, 1, D]
-            )
+            x_ty = np.ndarray[(t, d), np.dtype[dtype_in]]
+            w_ty = np.ndarray[(d, h), np.dtype[dtype_in]]
+            b_ty = np.ndarray[(h,), np.dtype[dtype_in]]
+            y_ty = np.ndarray[(t, h), np.dtype[dtype_out]]
 
             # AIE Core Function declarations - only matmul is used in this case
-            # func_type = "" if vectorized else "scalar_"
-            # zero = external_func(f"zero_{func_type}{dtype_out_str}", inputs=[y_ty])
-            
-            # eltwise_mul_bf16_scalar = external_func(
-            #     "eltwise_mul_bf16_scalar", inputs = [tile_ty, tile_ty, tile_ty]
-            # )
-            # eltwise_mul_bf16_vector = external_func(
-            #     "eltwise_mul_bf16_vector", inputs = [tile_ty, tile_ty, tile_ty]
-            # )
-            # reduce_add_vector = Kernel(
-            #     "reduce_add_vector", "reduce_add.cc.o", [in_ty, out_ty, np.bfloat16]
-            # )
-            # function_type = "" if vectorized else "scalar_"
-            # zero = external_func(f"zero_{func_type}{dtype_out_str}", inputs=[y_ty])
+            func_type = "" if vectorized else "scalar_"
+            zero = external_func(f"zero_{func_type}bf16", inputs = [y_ty])
+            matmul_func_name = f"matmul_{func_type}bf16_bf16"
             matmul = external_func(
                 matmul_func_name,
-                inputs=[x_ty, w_ty, i_ty]
+                inputs=[x_ty, w_ty, y_ty],
             )
+            row_wise_add_func = Kernel(
+                f"row_wise_bias_add_bf16_bf16", "kernel.o", [y_ty, b_ty, y_ty]
+            )
+            row_wise_add_func.resolve()  # Add this line
 
             # Tile declarations - can change later
-            shim_tile = tile(0, 0)
+            shim_tile1 = tile(0, 0)
+            shim_tile2 = tile(1, 0)
             mem_tile = tile(0, 1)
-            compute_tile2_col, compute_tile2_row = 0, 2
+            compute_tile1_col, compute_tile1_row = 0, 2
+            compute_tile2_col, compute_tile2_row = 0, 3
+            compute_tile1 = tile(compute_tile1_col, compute_tile1_row)
             compute_tile2 = tile(compute_tile2_col, compute_tile2_row)
 
             # AIE-array data movement with object fifos
             # Input X
-            inX = object_fifo("inX", shim_tile, mem_tile, 1, x_ty)
-            memX = object_fifo("memX", mem_tile, compute_tile2, 1, x_ty)
-            obejct_fifo_link(inX, memX)
+            inX = object_fifo("inX", shim_tile1, mem_tile, 2, x_ty)
+            memX = object_fifo(
+                "memX", 
+                mem_tile, 
+                compute_tile1, 
+                2, 
+                x_ty,
+                (
+                    [
+                        (t // r, r * d),
+                        (d // p, p),
+                        (r, d),
+                        (p, 1),
+                    ]
+                    if vectorized
+                    else []
+                ),
+            )
+            object_fifo_link(inX, memX)
 
             # Input W
-            inW = object_fifo("inW", shim_tile, mem_tile, 1, w_ty)
-            memW = object_fifo("memW", mem_tile, compute_tile2, 1, w_ty)
+            inW = object_fifo("inW", shim_tile1, mem_tile, 2, w_ty)
+            memW = object_fifo(
+                "memW", 
+                mem_tile, 
+                compute_tile1, 
+                2, 
+                w_ty,
+                (
+                    [
+                        # This transformation assumes the matrix is row major
+                        (d // p, p * h),
+                        (h // q, q),
+                        (p, h), 
+                        (q, 1),
+                    ]
+                ),
+            )
             object_fifo_link(inW, memW)
 
             # Input b
-            inB = object_fifo("inB", shim_tile, mem_tile, 1, b_ty)
-            memB = object_fifo("memB", mem_tile, compute_tile2, 1, b_ty)
+            inB = object_fifo("inB", shim_tile2, mem_tile, 2, b_ty)
+            memB = object_fifo("memB", mem_tile, compute_tile2, 2, b_ty)
             object_fifo_link(inB, memB)
 
             # Output Y
             memY = object_fifo("memY", compute_tile2, mem_tile, 2, y_ty)
-            outY = object_fifo("outY", mem_tile, shim_tile, 1, y_ty)
+            outY = object_fifo(
+                "outY",
+                mem_tile,
+                shim_tile2,
+                2,
+                y_ty,
+                (
+                    [
+                        (t // r, r * h),
+                        (r, q),
+                        (h // q, r * q),
+                        (q, 1),
+                    ]
+                    if vectorized
+                    else []
+                ),
+            )
             object_fifo_link(memY, outY)
 
-            # Buffer declarations to hold intermediate values
-            intermediate = buffer(
-                compute_tile2,
-                i_ty,
-                "intermediate", 
-                use_write_buffer = False,
-            )
+            # Intermediate result FIFO (connects compute_tile1 and compute_tile2)
+            mm_result = object_fifo("mm_result", compute_tile1, mem_tile, 2, y_ty)
+            mm_result_mem = object_fifo("mm_result_mem", mem_tile, compute_tile2, 2, y_ty)
+            object_fifo_link(mm_result, mm_result_mem)
 
             # Set up a packet-switched flow from core to shim for tracing information
-            tiles_to_trace = [compute_tile2]
+            tiles_to_trace = [compute_tile1, compute_tile2]
             if trace_size > 0:
-                trace_utils.configure_packet_tracing_flow(tiles_to_trace, shim_tile)
+                trace_utils.configure_packet_tracing_flow(tiles_to_trace, shim_tile2)
+                            # trace_utils.CoreEvent.INSTR_VECTOR,
 
-            tiles = 1
-            # Set up compute tiles - compute tile 2
-            @core(compute_tile2, f"linear_{B}x{T}x{D}x{H}.o")
-            def core_body():
+            # Setup for compute_tile1 - Matrix multiplication only
+            @core(compute_tile1, f"linear_mm_{t}x{d}x{h}.o", stack_size=0xD00)
+            def core_mm_body():
                 for _ in range_(0xFFFFFFFF):
                     for _ in range_(tiles) if tiles > 1 else range(1):
+                        elem_out_mm = mm_result.acquire(ObjectFifoPort.Produce, 1)
+                        zero(elem_out_mm)
+
+                        for _ in (
+                            range_(D_div_d) if D_div_d > 1 else range(1)
+                        ):
+                            # Get input matrices
+                            elem_inX = memX.acquire(ObjectFifoPort.Consume, 1)
+                            elem_inW = memW.acquire(ObjectFifoPort.Consume, 1)
+
+                            matmul(elem_inX, elem_inW, elem_out_mm)
+                            memX.release(ObjectFifoPort.Consume, 1)
+                            memW.release(ObjectFifoPort.Consume, 1)
+                    
+                    mm_result.release(ObjectFifoPort.Produce, 1)
+            @core(compute_tile2, f"linear_bias_{t}x{d}x{h}.o", stack_size=0xD00)
+            def core_bias_body():
+                for _ in range_(0xFFFFFFFF):
+                    for _ in range_(tiles) if tiles > 1 else range(1):
+                        elem_mm_result = mm_result_mem.acquire(ObjectFifoPort.Consume, 1)
+                        elem_inb = memB.acquire(ObjectFifoPort.Consume, 1)
                         elem_out = memY.acquire(ObjectFifoPort.Produce, 1)
-                        elem_inX = memX.acquire(ObjectFifoPort.Consume, 1)
-                        elem_inW = memW.acquire(ObjectFifoPort.Consume, 1)
-                        elem_inB = memB.acquire(ObjectFifoPort.Consume, 1)
 
-                        matmul(elem_inX, elem_inW, intermediate)
-                        memX.release(ObjectFifoPort.Consume, 1)
-                        memW.release(ObjectFifoPort.Consume, 1)
+                        row_wise_add_func(elem_mm_result, elem_inb, elem_out)
 
-                        for i in range(T):
-                            for j in range(H):
-                                elem_out = intermediate[i, j] + elem_inB[j]
-
+                        mm_result_mem.release(ObjectFifoPort.Consume, 1)
                         memB.release(ObjectFifoPort.Consume, 1)
-                        memY.release(ObjectFIfoPort.Produce, 1)
+                        memY.release(ObjectFifoPort.Produce, 1)
 
             @runtime_sequence(
                 np.ndarray[(X_sz,), np.dtype[dtype_in]],
                 np.ndarray[(W_sz,), np.dtype[dtype_in]],
-                np.ndarray[(b_sz,), np.dtype(dtype_in)],
+                np.ndarray[(b_sz,), np.dtype[dtype_in]],
                 np.ndarray[(Y_sz,), np.dtype[dtype_out]],
             )
             def sequence(X, W, B, Y):
                 if enable_tracing:
                     trace_utils.configure_packet_tracing_aie2(
-                        tiles_to_trace = tiles_to_trace,
-                        shim=shim_tile,
+                        tiles_to_trace = [compute_tile1, compute_tile2],
+                        shim=shim_tile2,
                         trace_size=trace_size,
-                        coretile_event=[
+                        coretile_events=[
                             # captures input X (PORT_RUNNING_0, at port number 1, master for inputs)
                             trace_utils.PortEvent(
                                 trace_utils.CoreEvent.PORT_RUNNING_0,
@@ -203,30 +271,67 @@ def linear(
                             ),
                             trace_utils.CoreEvent.INSTR_EVENT_0,
                             trace_utils.CoreEvent.INSTR_EVENT_1,
-                            trace_utils.CoreEvent.INSTR_EVENT_2,
                             trace_utils.CoreEvent.MEMORY_STALL,
                             trace_utils.CoreEvent.LOCK_STALL,
-                            trace_utils.CoreEvent.INSTR_VECTOR,
+                            # trace_utils.CoreEvent.INSTR_VECTOR,
                         ],
                     )
 
-                # Transfer input data into AIE. Take the transpose of matrix W in the process
-                npu_dma_memcpy_nd(metadata=memX, bd_id=0, mem=X)
-                npu_dma_memcpy_nd(metadata=memW, bd_id=1, mem=W, tap=transpose_W)
-                npu_dma_memcpy_nd(metadata=memB, bd_id=2, mem=B)
-                
-                # Set up output DMA transfer
-                npu_dma_memcpy_nd(metadata=outY, bd_id=3, mem=Y)
+                rows_per_block = 4
+                for tile_row_block in range(ceildiv(T_div_t, rows_per_block)):
+                    for pingpong in [0, 1]:
+                        Y_row_offset = (
+                            tile_row_block * rows_per_block * t * T
+                            + pingpong * rows_per_block // 2 * t * T
+                        )
+                        row_base = (
+                            tile_row_block * rows_per_block + pingpong + rows_per_block // 2
+                        )
+                        bd_id_base = 8 * pingpong
+                        num_tile_rows = min([rows_per_block // 2, T_div_t - row_base])
+                        if num_tile_rows <= 0: 
+                            break
+                        
+                        npu_dma_memcpy_nd(
+                            metadata=outY, 
+                            bd_id=bd_id_base, 
+                            mem=Y, 
+                            offsets=[0, 0, 0, Y_row_offset],
+                            sizes=[num_tile_rows, H // h, t, h], 
+                            strides=[t * H, h, H, 1],
+                        )
 
-                # Wait for all transfers to complete
-                dma_wait(inX, inW, inB)
-                
-                # Wait for computation to finish and output to be ready
+                        npu_dma_memcpy_nd(
+                            metadata=inB, 
+                            bd_id=bd_id_base + 6,
+                            mem=B,
+                            sizes=[1, 1, 1, H],  # 4D tensor format
+                            strides=[H*2, H*2, H*2, 2])
+
+                        for tile_row in range(num_tile_rows):
+                            X_row_offset = (row_base + tile_row) * t * D
+                            npu_dma_memcpy_nd(
+                                metadata=inX, 
+                                bd_id=bd_id_base + 2 * tile_row + 1, 
+                                mem=X, 
+                                offsets=[0, 0, 0, X_row_offset],
+                                sizes=[H // h, D // d, t, d], 
+                                strides=[0, d, D, 1],
+                            )
+
+                            npu_dma_memcpy_nd(
+                                metadata=inW, 
+                                bd_id=bd_id_base + 2 * tile_row + 2, 
+                                mem=W, 
+                                sizes = [H // h, D // d, d, h],
+                                strides=[h, d * H, H, 1])
+                        if tile_row_block > 0 or (tile_row_block == 0 and pingpong > 0):
+                            dma_wait(outY)
                 dma_wait(outY)
 
                 # Finalize tracing if enabled
                 if enable_tracing:
-                    trace_utils.gen_trace_done_aie2(shim_tile)
+                    trace_utils.gen_trace_done_aie2(shim_tile2)
 
     print(ctx.module)
 
