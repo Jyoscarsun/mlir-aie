@@ -30,6 +30,11 @@ The file outlines the commands to run the design successfully. Specifically, it 
 * Build various MLIR and `.o` files from `.cc` files. Most of the functions relying on external kernels need to have these files build prior to running successfully.
 * Build an executable `.exe` file that runs the `test.cpp` file and run design verification.
 
+### kernel.cc
+Contains code needed for row-wise mutliplication.
+
+### CMakeLists.txt and common.h
+Contains code needed for successful compilation. 
 
 ## Usage
 
