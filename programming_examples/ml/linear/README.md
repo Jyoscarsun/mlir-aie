@@ -19,7 +19,7 @@ This file describes the detailed design and dataflows within the AI Engine for l
    * Load data directly with varioys offsets, sizes, and strides. Tiling the loaded data here is necessary.
 
 ## test.cpp
-This file verifies the design performs exactly the way that's expected. In the linear layer, this file would compute output to the linear layer and compare it to the values compute with the design in `linear.py`. Necessary inclusions needed in this file are outlined below. 
+This file verifies the design performs exactly the way that's expected. In the linear layer, this file would compute output to the linear layer and compare it to the values compute with the design in `linear.py`. Necessary inclusions needed in this file are outlined below. This C++ code is a testbench for the design example. The code is responsible for loading the compiled XCLBIN file, configuring the AIE module, providing input data, and executing the AIE design on the NPU. After executing, the script verifies the memcpy results and optionally outputs trace data.
 * Verification function: this function computes the correct answers and accepts a tolerance to how far the values from AI Engine computation can deviate.
 * Main function: declare the dimensions from the matrices from parsing input parameters, and load them into arrays for verification. The matrices and arrays are filled up with random `bfloat16` values.
 * The rest of the `test.cpp` file is standard in calculating time of computation on NPU and displaying errors if there are any above tolerance.  
@@ -38,12 +38,6 @@ The file outlines the commands to run the design successfully. Specifically, it 
 To compile the design and C++ testbench:
 ```shell
 make
-```
-
-To compile for the placed design:
-
-```shell
-env use_placed=1 make
 ```
 
 To run the design:
