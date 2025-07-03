@@ -1,0 +1,3 @@
+/home/npu-sm/mlir-aie/programming_examples/ml/linear/_build/CMakeFiles/linear.dir
+/home/npu-sm/mlir-aie/programming_examples/ml/linear/_build/CMakeFiles/edit_cache.dir
+/home/npu-sm/mlir-aie/programming_examples/ml/linear/_build/CMakeFiles/rebuild_cache.dir
