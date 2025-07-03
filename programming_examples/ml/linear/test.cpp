@@ -62,7 +62,7 @@ int verify(
     int errors = 0;
     size_t t = X[0].size(); // Number of time steps t
     size_t d = X[0][0].size(); // Input dimension d
-    size_t h = W.size() // Output dimension h
+    size_t h = W.size(); // Output dimension h
 
     for(size_t i = 0; i < t; ++i){
         for(size_t j = 0; j < h; ++j){
@@ -82,7 +82,7 @@ int verify(
             }
         }
     }
-    return errors
+    return errors;
 }
 
 // ----------------------------------------------------------------------------
@@ -91,7 +91,7 @@ int verify(
 int main(int argc, const char *argv[]){
 
     // ------------------------------------------------------
-    // Parse program argumentsposter
+    // Parse program arguments
     // ------------------------------------------------------
     cxxopts::Options options("Linear Layer Test");
     cxxopts::ParseResult vm;
@@ -119,9 +119,9 @@ int main(int argc, const char *argv[]){
 
     size_t OUT_SIZE = OUTY_SIZE + trace_size;
 
-    srant(time(NULL));
+    srand(time(NULL));
     
-    // Load isntruction sequence
+    // Load instruction sequence
     std::vector<uint32_t> instr_v = 
         test_utils::load_instr_binary(vm["instr"].as<std::string>());
     if (verbosity >= 1)
@@ -195,58 +195,55 @@ int main(int argc, const char *argv[]){
     memcpy(bufInstr, instr_v.data(), instr_v.size() * sizeof(int));
 
     // Initialize inX buffer
-    INX_DATATYPE *bufInX = bo_inx.map<INX_DATATYPE *>();
-    std::vector<std::vector<std::vector<INX_DATATYPE>>> XVec(
+    X_DATATYPE *bufInX = bo_inx.map<X_DATATYPE *>();
+    std::vector<std::vector<std::vector<X_DATATYPE>>> XVec(
         B, 
-        std::vector<std::vector<INX_DATATYPE>>(T, 
-            std::vector<INX_DATATYPE>(D)));
+        std::vector<std::vector<X_DATATYPE>>(T, 
+            std::vector<X_DATATYPE>(D)));
     for(int i = 0; i < B; ++i){
         for(int j = 0; j < T; ++j){
             for(int k = 0; k < D; ++k){
                 XVec[i][j][k] = test_utils::random_bfloat16_t((std::bfloat16_t)1.0,
                                                             (std::bfloat16_t)-0.5);
             }
-        }    std::vector<std::vector<INOUT0_DATATYPE>> AVec2D(INOUT0_VOLUME, std::vector<INOUT0_DATATYPE>(INOUT1_VOLUME));
-
+        }
     }
+    
     // Flatten to buffer
     for(int i = 0; i < B; ++i){
         for(int j = 0; j < T; ++j){
             for(int k = 0; k < D; ++k){
-                size_t flat_ind = i * B * T + j * T + k;
+                size_t flat_ind = i * T * D + j * D + k;
                 bufInX[flat_ind] = XVec[i][j][k];
-                // this replaced memcpy(bufInOut0, AVec.data(), (AVec.size() * sizeof(INOUT0_DATATYPE)));
             }
         }
     }
 
-
     // Initialize inW buffer
-    INW_DATATYPE *bufInW = bo_inw.map<INW_DATATYPE *>();
-    std::vector<std::vector<INW_DATATYPE>> WVec(H, std::vector<INW_DATATYPE>(D));
+    W_DATATYPE *bufInW = bo_inw.map<W_DATATYPE *>();
+    std::vector<std::vector<W_DATATYPE>> WVec(H, std::vector<W_DATATYPE>(D));
     for(int i = 0; i < H; ++i){
         for(int j = 0; j < D; ++j){
-            WVec[i][j] = test:utils::random_bfloat16_t((std::bfloat16_t)1.0,
-                                                        (std::bfloat16_t)-0.5);
-                    
+            WVec[i][j] = test_utils::random_bfloat16_t((std::bfloat16_t)1.0,
+                                                      (std::bfloat16_t)-0.5);
         }
     }
+    
     // Flatten to buffer
     for(int i = 0; i < H; ++i){
         for(int j = 0; j < D; ++j){
-            size_t flat_ind = i * H + j;
+            size_t flat_ind = i * D + j;
             bufInW[flat_ind] = WVec[i][j];
-            // this replaced memcpy(bufInOut1, BVec.data(), (BVec.size() * sizeof(INOUT1_DATATYPE)));
         }
     }
 
     // Initialize inB buffer
-    INB_DATATYPE *bufInB = bo_inb.map<INB_DATATYPE *>();
-    std::vector<INB_DATATYPE> BVec(H);
+    B_DATATYPE *bufInB = bo_inb.map<B_DATATYPE *>();
+    std::vector<B_DATATYPE> BVec(H);
     for(int i = 0; i < H; i++)
         BVec[i] = test_utils::random_bfloat16_t((std::bfloat16_t)1.0,
-                                                (std::bfloat16_t)-0.5);
-    memcpy(bufInB, BVec.data(), (BVec.size() * sizeof(INB_DATATYPE)));
+                                              (std::bfloat16_t)-0.5);
+    memcpy(bufInB, BVec.data(), (BVec.size() * sizeof(B_DATATYPE)));
 
     // Initialize outY buffer
     char *bufOutY = bo_outy.map<char *>();
@@ -293,13 +290,13 @@ int main(int argc, const char *argv[]){
         }
         
         // Copy output results and verify they are correct
-        OUTY_DATATYPE* typedBuf = reinterpret_cast<OUTY_DATATYPE*>(bufOutY);
+        Y_DATATYPE* typedBuf = reinterpret_cast<Y_DATATYPE*>(bufOutY);
         // Create a 2D vector to store the result
-        std::vector<std::vector<OUTY_DATATYPE>> YVec(T, std::vector<OUTY_DATATYPE>(H));
-        // Fill CMatrix with the flattened output
+        std::vector<std::vector<Y_DATATYPE>> YVec(T, std::vector<Y_DATATYPE>(H));
+        // Fill YVec with the flattened output
         for (int i = 0; i < T; ++i) {
             for (int j = 0; j < H; ++j) {
-                size_t flat_index = i * T + j;  // Row-major layout
+                size_t flat_index = i * H + j;  // Row-major layout
                 YVec[i][j] = typedBuf[flat_index];
             }
         }
@@ -320,14 +317,14 @@ int main(int argc, const char *argv[]){
         }
         else{
             if(verbosity >= 1){
-                std::cout << "WARNING: results not verified." << std:endl;
+                std::cout << "WARNING: results not verified." << std::endl;
             }
         }
 
         // Write trace values if trace_size > 0
         if(trace_size > 0){
-            test_utils.write_out_trace(((char *)bufOutY) + OUTY_SIZE, trace_size, 
-                                                vm["trace_file"].as<std::string>());
+            test_utils::write_out_trace(((char *)bufOutY) + OUTY_SIZE, trace_size, 
+                                      vm["trace_file"].as<std::string>());
         }
 
         // Accumulate run times
@@ -341,7 +338,7 @@ int main(int argc, const char *argv[]){
     }
 
     // ------------------------------------------------------
-    // Initialize run configs
+    // Display results
     // ------------------------------------------------------
 
     // TODO - Mac count to guide gflops
